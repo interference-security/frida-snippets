@@ -13,16 +13,21 @@
 * [`Log SQLite query`](#log-sqlite-query)
 * [`Log method arguments`](#log-method-arguments)
 * [`Intercept entire module`](#intercept-entire-module)
+* [`Dump memory segments`](#dump-memory-segments)
+* [`Memory scan`](#memory-scan)
+* [`Stalker`](#stalker)
 
 </details>
 
 <details>
 <summary>Android</summary>
 
+* [`Get system property`](#system-property-get)
 * [`Reveal manually registered native symbols`](#reveal-native-methods)
 * [`Enumerate loaded classes`](#enumerate-loaded-classes) 
 * [`Class description`](#class-description)
 * [`Turn WiFi off`](#turn-wifi-off)
+* [`Set proxy`](#set-proxy)
 * [`Get IMEI`](#get-imei)
 * [`Hook io InputStream`](#hook-io-inputstream)
 * [`Android make Toast`](#android-make-toast)
@@ -36,9 +41,11 @@
 * [`Trace class`](#trace-class)
 * [`Hooking Unity3d`](https://github.com/iddoeldor/mplus)
 * [`Get Android ID`](#get-android-id)
+* [`Change location`](#change-location)
 * [`Bypass FLAG_SECURE`](#bypass-flag_secure)
 * [`Shared Preferences update`](#shared-preferences-update)
 * [`Hook all method overloads`](#hook-overloads)
+* [`Register broadcast receiver`](#register-broadcast-receiver)
 * File system access hook `$ frida --codeshare FrenchYeti/android-file-system-access-hook -f com.example.app --no-pause`
 </details>
 
@@ -55,6 +62,7 @@
 * [`Class hierarchy`](#class-hierarchy) 
 * [`Hook refelaction`](#hook-refelaction)
 * [`Device properties`](#device-properties)
+* [`Take screenshot`](#take-screenshot)
 
 </details>
 
@@ -106,16 +114,14 @@ ab fridadescribe console.log(Object.getOwnPropertyNames(Java.use('$').__proto__)
 
 #### One time watchpoint
 
-For this example I'm intercepting `funcPtr` & I want to know who read/write to `x2` so I remove permissions w/ `mprotect`.
+Intercept `funcPtr` & log who read/write to `x2` via removing permissions w/ `mprotect`.
 
 ```js
 Process.setExceptionHandler(function(exp) {
-  console.warn(JSON.stringify(exp, null, 2));
-  // can implement a switch case on exp.memory.operation, if read set only 'r--' if write '-w-' etc..
+  console.warn(JSON.stringify(Object.assign(exp, { _lr: DebugSymbol.fromAddress(exp.context.lr), _pc: DebugSymbol.fromAddress(exp.context.pc) }), null, 2));
   Memory.protect(exp.memory.address, Process.pointerSize, 'rw-');
   // can also use `new NativeFunction(Module.findExportByName(null, 'mprotect'), 'int', ['pointer', 'uint', 'int'])(parseInt(this.context.x2), 2, 0)`
-
-  return true;
+  return true; // goto PC 
 });
 
 Interceptor.attach(funcPtr, {
@@ -254,6 +260,35 @@ Interceptor.attach(Module.findExportByName("/system/lib/libc.so", "open"), {
     if (this.flag) // passed from onEnter
       console.warn("\nretval: " + retval);
   }
+});
+```
+
+
+```js
+var fds = {}; // for f in /proc/`pidof $APP`/fd/*; do echo $f': 'readlink $f; done
+Interceptor.attach(Module.findExportByName(null, 'open'), {
+  onEnter: function (args) {
+    var fname = args[0].readCString();
+    if (fname.endsWith('.jar')) {
+      this.flag = true;
+      this.fname = fname;
+    }
+  },
+  onLeave: function (retval) {
+    if (this.flag) {
+      fds[retval] = this.fname;
+    }
+  }
+});
+['read', 'pread', 'readv'].forEach(fnc => {
+  Interceptor.attach(Module.findExportByName(null, fnc), {
+    onEnter: function (args) {
+      var fd = args[0];
+      if (fd in fds)
+        console.log(`${fnc}: ${fds[fd]}
+	\t${Thread.backtrace(this.context, Backtracer.ACCURATE).map(DebugSymbol.fromAddress).join('\n\t')}`);
+    }
+  });
 });
 ```
 
@@ -407,6 +442,68 @@ TODO
 </details>
 
 <br>[⬆ Back to top](#table-of-contents)
+
+#### system property get
+
+```js
+Interceptor.attach(Module.findExportByName(null, '__system_property_get'), {
+	onEnter: function (args) {
+		this._name = args[0].readCString();
+		this._value = args[1];
+	},
+	onLeave: function (retval) {
+		console.log(JSON.stringify({
+			result_length: retval,
+			name: this._name,
+			val: this._value.readCString()
+		}));
+	}
+});
+```
+
+<details>
+<summary>Output example</summary>
+
+```sh
+{"result_length":"0x0","name":"ro.kernel.android.tracing","val":""}
+{"result_length":"0x0","name":"ro.config.hw_log","val":""}
+{"result_length":"0x0","name":"ro.config.hw_module_log","val":""}
+{"result_length":"0x1","name":"ro.debuggable","val":"0"}
+{"result_length":"0x1","name":"persist.sys.huawei.debug.on","val":"0"}
+{"result_length":"0x1","name":"ro.logsystem.usertype","val":"6"}
+{"result_length":"0x6","name":"ro.board.platform","val":"hi6250"}
+{"result_length":"0x4","name":"persist.sys.enable_iaware","val":"true"}
+{"result_length":"0x1","name":"persist.sys.cpuset.enable","val":"1"}
+{"result_length":"0x4","name":"persist.sys.cpuset.subswitch","val":"1272"}
+{"result_length":"0x4","name":"persist.sys.boost.durationms","val":"1000"}
+{"result_length":"0x4","name":"persist.sys.boost.isbigcore","val":"true"}
+{"result_length":"0x7","name":"persist.sys.boost.freqmin.b","val":"1805000"}
+{"result_length":"0x4","name":"persist.sys.boost.ipapower","val":"3500"}
+{"result_length":"0x0","name":"persist.sys.boost.skipframe","val":""}
+{"result_length":"0x0","name":"persist.sys.boost.byeachfling","val":""}
+{"result_length":"0x1","name":"debug.force_rtl","val":"0"}
+{"result_length":"0x0","name":"ro.hardware.gralloc","val":""}
+{"result_length":"0x6","name":"ro.hardware","val":"hi6250"}
+{"result_length":"0x0","name":"ro.kernel.qemu","val":""}
+{"result_length":"0x0","name":"ro.config.hw_force_rotation","val":""}
+{"result_length":"0x0","name":"persist.fb_auto_alloc","val":""}
+{"result_length":"0x0","name":"ro.config.hw_lock_res_whitelist","val":""}
+{"result_length":"0x3","name":"ro.sf.lcd_density","val":"480"}
+{"result_length":"0x0","name":"persist.sys.dpi","val":""}
+{"result_length":"0x0","name":"persist.sys.rog.width","val":""}
+{"result_length":"0x4","name":"dalvik.vm.usejitprofiles","val":"true"}
+{"result_length":"0x1","name":"debug.atrace.tags.enableflags","val":"0"}
+{"result_length":"0x1","name":"ro.debuggable","val":"0"}
+{"result_length":"0x1","name":"debug.force_rtl","val":"0"}
+{"result_length":"0x0","name":"ro.config.hw_lock_res_whitelist","val":""}
+....
+```
+	
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
+
 
 #### Reveal native methods
 
@@ -771,6 +868,28 @@ Java.use("android.app.Activity").onCreate.overload("android.os.Bundle").implemen
     wManager.setWifiEnabled(false);
     this.$init(bundle);
 }
+```
+
+<details>
+<summary>Output example</summary>
+TODO
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
+#### Set proxy
+
+It will set a system-wide proxy using the supplied IP address and port.
+
+```js
+var ActivityThread      = Java.use('android.app.ActivityThread');
+var ConnectivityManager = Java.use('android.net.ConnectivityManager');
+var ProxyInfo           = Java.use('android.net.ProxyInfo');
+
+var proxyInfo           = ProxyInfo.$new('192.168.1.10', 8080, ''); // change to null in order to disable the proxy.
+var context = ActivityThread.currentApplication().getApplicationContext();
+var connectivityManager = Java.cast(context.getSystemService('connectivity'), ConnectivityManager);
+connectivityManager.setGlobalProxy(proxyInfo);
 ```
 
 <details>
@@ -1225,6 +1344,30 @@ https://stackoverflow.com/a/54818023/2655092
 <br>[⬆ Back to top](#table-of-contents)
 
 
+#### Change location
+
+
+```js
+Java.perform(() => {
+	var Location = Java.use('android.location.Location');
+	Location.getLatitude.implementation = function() {
+		return LATITUDE;
+	}
+	Location.getLongitude.implementation = function() {
+		return LONGITUDE;
+	}
+})
+```
+
+<details>
+<summary>Output example</summary>
+TODO
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
+
+
 #### Bypass FLAG_SECURE
 Bypass screenshot prevention [stackoverflow question](https://stackoverflow.com/questions/9822076/how-do-i-prevent-android-taking-a-screenshot-when-my-app-goes-to-the-background)
 
@@ -1270,8 +1413,6 @@ TODO
 
 <br>[⬆ Back to top](#table-of-contents)
 
-
-
 #### Hook overloads
 
 ```javascript
@@ -1304,6 +1445,36 @@ function hookOverloads(className, func) {
 Java.perform(function() {
   hookOverloads('java.lang.StringBuilder', '$init');
 })
+```
+
+<details>
+<summary>Output example</summary>
+TODO
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
+
+#### Register broadcast receiver
+
+```javascript
+Java.perform(() => {
+    const MyBroadcastReceiver = Java.registerClass({
+        name: 'MyBroadcastReceiver',
+        superClass: Java.use('android.content.BroadcastReceiver'),
+        methods: {
+            onReceive: [{
+                returnType: 'void',
+                argumentTypes: ['android.content.Context', 'android.content.Intent'],
+                implementation: function(context, intent) {
+                    // ..
+                }
+            }]
+        },
+    });
+    let ctx = Java.use('android.app.ActivityThread').currentApplication().getApplicationContext();
+    ctx.registerReceiver(MyBroadcastReceiver.$new(), Java.use('android.content.IntentFilter').$new('com.example.JAVA_TO_AGENT'));
+});
 ```
 
 <details>
@@ -1690,6 +1861,143 @@ TODO
 <br>[⬆ Back to top](#table-of-contents)
 
 
+
+#### Dump memory segments
+
+```js
+Process.enumerateRanges('rw-', {
+	onMatch: function (range) {
+		var fname = `/sdcard/${range.base}_dump`;
+		var f = new File(fname, 'wb');
+		f.write(instance.base.readByteArray(instance.size));
+		f.flush();
+		f.close();
+		console.log(`base=${range.base} size=${range.size} prot=${range.protection} fname=${fname}`);
+	},
+	onComplete: function () {}
+});
+```
+
+<details>
+<summary>Output example</summary>
+TODO	
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
+
+
+#### Memory scan
+
+```js
+function memscan(str) {
+	Process.enumerateModulesSync().filter(m => m.path.startsWith('/data')).forEach(m => {
+		var pattern = str.split('').map(letter => letter.charCodeAt(0).toString(16)).join(' ');
+		try {
+			var res = Memory.scanSync(m.base, m.size, pattern);
+			if (res.length > 0)
+				console.log(JSON.stringify({m, res}));
+		} catch (e) {
+			console.warn(e);
+		}
+	});
+}
+```
+
+
+```js
+var memscn = function (str) {
+	Process.enumerateModulesSync().forEach(function (m) {
+		var pattern = str.split('').map(function (l) { return l.charCodeAt(0).toString(16) }).join(' ');
+		try {
+			var res = Memory.scanSync(m.base, m.size, pattern);
+			if (res.length > 0)
+				console.log(JSON.stringify({m, res}, null , 2));
+		} catch (e) {
+			console.warn(e);
+		}
+	});
+}
+```
+
+<details>
+<summary>Output example</summary>
+pattern [ 52 41 4e 44 4f 4d ] {
+  "name": "Test",
+  "base": "0x1048fc000",
+  "size": 147000,
+  "path": "/var/containers/Bundle/Application/CD74EB00-9D90-4600-BF5D-F6E5E0CDF878/Test.app/Test"
+}
+[{"address":"0x10491f211","size":6}]
+
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
+
+
+
+
+
+
+#### Stalker
+
+```js
+  var _module = Process.findModuleByName('myModule');
+  var base = ptr(_module.base);
+  var startTraceOffset = 0xabcd1234, numInstructionsToTrace = 50;
+  var startTrace = base.add(startTraceOffset), endTrace = startTrace.add(4 * (numInstructionsToTrace - 1));
+  
+  Interceptor.attach(ObjC.classes.CustomClass['- func'].implementation, {
+    onEnter: function (args) {
+      var tid = Process.getCurrentThreadId();
+      this.tid = tid;
+      console.warn(`onEnter [ ${tid} ]`);     
+      Stalker.follow(tid, {
+        transform: function (iterator) {
+          var instruction;
+          while ((instruction = iterator.next()) !== null) {
+            // condition to putCallout
+	    if (instruction.address <= endTrace && instruction.address >= startTrace) {     
+	      // print instruction & registers values
+              iter.putCallout(function(context) {
+                var offset = ptr(context.pc).sub(base);
+                var inst = Instruction.parse(context.pc).toString();
+                var modified_inst = inst;
+                inst.replace(/,/g, '').split(' ').forEach(op => {
+                  if (op.startsWith('x'))
+                    modified_inst = modified_inst.replace(op, context[op]);
+                  else if (op.startsWith('w'))
+                    modified_inst = modified_inst.replace(op, context[op.replace('w', 'x')]);
+                });
+                modified_inst = '\x1b[35;01m' + modified_inst + '\x1b[0m';
+                console.log(`x8=${context.x8} x25=${context.x25} x0=${context.x0} x21=${context.x21}`)
+                console.log(`${offset} ${inst} # ${modified_inst}`);
+              });
+	    }
+	    iterator.keep();
+          }
+        }
+      })
+    },  
+    onLeave: function (retval) {
+      console.log(`onLeave [ ${this.tid} ]`);
+      // cleanup
+      Stalker.unfollow(this.tid);
+      Stalker.garbageCollect();
+    }   
+  })  
+```
+
+<details>
+<summary>Output example</summary>
+mul x5, x2, x21 # mul 0x3, 0x4, 0x5
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
+
+
 #### Device properties
 Example of quick&dirty iOS device properties extraction
 
@@ -1697,7 +2005,7 @@ Example of quick&dirty iOS device properties extraction
 var UIDevice = ObjC.classes.UIDevice.currentDevice();
 UIDevice.$ownMethods
   .filter(function(method) { 
-    return method.indexOf(':') == -1 /* filter out methods with parameters */·
+    return method.indexOf(':') == -1 /* filter out methods with parameters */
        && method.indexOf('+') == -1 /* filter out public methods */
   })
   .forEach(function(method) { 
@@ -1764,6 +2072,85 @@ console.log('executablePath =', ObjC.classes.NSBundle.mainBundle().executablePat
 </details>
 
 <br>[⬆ Back to top](#table-of-contents)
+
+
+#### Take screenshot
+
+```js
+function screenshot() {
+  ObjC.schedule(ObjC.mainQueue, function() {
+    var getNativeFunction = function (ex, retVal, args) {
+      return new NativeFunction(Module.findExportByName('UIKit', ex), retVal, args);
+    };
+    var api = {
+      UIWindow: ObjC.classes.UIWindow,
+      UIGraphicsBeginImageContextWithOptions: getNativeFunction('UIGraphicsBeginImageContextWithOptions', 'void', [['double', 'double'], 'bool', 'double']),
+      UIGraphicsBeginImageContextWithOptions: getNativeFunction('UIGraphicsBeginImageContextWithOptions', 'void', [['double', 'double'], 'bool', 'double']),
+      UIGraphicsEndImageContext: getNativeFunction('UIGraphicsEndImageContext', 'void', []),
+      UIGraphicsGetImageFromCurrentImageContext: getNativeFunction('UIGraphicsGetImageFromCurrentImageContext', 'pointer', []),
+      UIImagePNGRepresentation: getNativeFunction('UIImagePNGRepresentation', 'pointer', ['pointer'])
+    };
+    var view = api.UIWindow.keyWindow();
+    var bounds = view.bounds();
+    var size = bounds[1];
+    api.UIGraphicsBeginImageContextWithOptions(size, 0, 0);
+    view.drawViewHierarchyInRect_afterScreenUpdates_(bounds, true);
+
+    var image = api.UIGraphicsGetImageFromCurrentImageContext();
+    api.UIGraphicsEndImageContext();
+
+    var png = new ObjC.Object(api.UIImagePNGRepresentation(image));
+    send('screenshot', Memory.readByteArray(png.bytes(), png.length()));
+  });
+}
+
+rpc.exports = {
+  takescreenshot: screenshot
+}
+```
+
+```py
+...
+def save_screenshot(d):
+    f = open('/tmp/screenshot.png', 'wb')
+    f.write(d)
+    f.close()
+
+def on_message(msg, data):
+    save_screenshot(data)
+ 
+ script.exports.takescreenshot()
+ 
+ # open screenshot & invoke rpc via input 
+ # <Ctrl+C> will take screenshot, open it with eog & wait for export function name to invoke via input
+ def on_message(msg, data):
+    if 'payload' in msg:
+        if msg['payload'] == 'screenshot':
+            i = '/tmp/screenshot.png'
+            f = open(i, 'wb')
+            f.write(data)
+            f.close()
+            subprocess.call(['eog', i])
+	   
+ while True:
+    try:
+        time.sleep(1)
+    except KeyboardInterrupt:
+        script.exports.takescreenshot()
+        try:
+            getattr(script.exports, input())()
+        except (KeyboardInterrupt, frida.core.RPCException) as e:
+            print('[!]', e)
+
+```
+
+<details>
+<summary>Output example</summary>
+TODO
+</details>
+
+<br>[⬆ Back to top](#table-of-contents)
+
 
 
 #### TODOs 
